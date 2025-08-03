@@ -7,97 +7,110 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  docker-test:
+  test:
     runs-on: ubuntu-latest
     
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: secret
+          MYSQL_DATABASE: laravel
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
     steps:
     - uses: actions/checkout@v4
 
-    - name: Create .env file
-      run: |
-        cp .env.example .env
-        echo "APP_KEY=" >> .env
-        # Set proper ownership for mounted files
-        sudo chown -R $USER:$USER .
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.2'
+        extensions: mbstring, dom, fileinfo, mysql, gd, zip
+        coverage: none
 
-    - name: Build and start containers
-      run: |
-        docker compose up -d
-        sleep 30
+    - name: Install dependencies
+      run: composer install --prefer-dist --no-progress
 
-    - name: Fix permissions and install dependencies
-      run: |
-        # Fix git safe directory
-        docker compose exec -T app git config --global --add safe.directory /var/www
-        # Fix vendor directory permissions
-        docker compose exec -T app mkdir -p vendor
-        docker compose exec -T app chown -R www-data:www-data /var/www
-        # Install dependencies
-        docker compose exec -T app composer install --no-interaction
+    - name: Copy .env
+      run: cp .env.example .env
 
     - name: Generate app key
-      run: |
-        docker compose exec -T app php artisan key:generate
-        # Ensure storage permissions
-        docker compose exec -T app chmod -R 775 storage bootstrap/cache
+      run: php artisan key:generate
 
-    - name: Wait for database
-      run: |
-        timeout 60 bash -c 'until docker compose exec -T db mysql -u root -psecret -e "SELECT 1"; do sleep 2; done'
+    - name: Directory Permissions
+      run: chmod -R 777 storage bootstrap/cache
 
     - name: Run migrations
-      run: docker compose exec -T app php artisan migrate --force
+      env:
+        DB_CONNECTION: mysql
+        DB_HOST: 127.0.0.1
+        DB_PORT: 3306
+        DB_DATABASE: laravel
+        DB_USERNAME: root
+        DB_PASSWORD: secret
+      run: php artisan migrate --force
+
+    - name: Run EG-R2 route generation
+      env:
+        DB_CONNECTION: mysql
+        DB_HOST: 127.0.0.1
+        DB_PORT: 3306
+        DB_DATABASE: laravel
+        DB_USERNAME: root
+        DB_PASSWORD: secret
+      run: php artisan eg-r2:generate-route
 
     - name: Run tests
       id: test
+      env:
+        DB_CONNECTION: mysql
+        DB_HOST: 127.0.0.1
+        DB_PORT: 3306
+        DB_DATABASE: laravel
+        DB_USERNAME: root
+        DB_PASSWORD: secret
       run: |
-        echo "RESULT<<EOF" >> $GITHUB_OUTPUT
-        docker compose exec -T app php artisan test 2>&1 | tee test-output.txt
-        echo "EOF" >> $GITHUB_OUTPUT
-        
-        if docker compose exec -T app php artisan test >/dev/null 2>&1; then
+        if php artisan test; then
           echo "SUCCESS=true" >> $GITHUB_OUTPUT
+          echo "TEST_OUTPUT<<EOF" >> $GITHUB_OUTPUT
+          php artisan test
+          echo "EOF" >> $GITHUB_OUTPUT
         else
           echo "SUCCESS=false" >> $GITHUB_OUTPUT
+          echo "TEST_OUTPUT<<EOF" >> $GITHUB_OUTPUT
+          php artisan test || true
+          echo "EOF" >> $GITHUB_OUTPUT
         fi
 
-    - name: Generate test summary
-      run: |
-        echo "## 🧪 テスト結果" > docker-test-report.md
-        echo "" >> docker-test-report.md
-        if [ "${{ steps.test.outputs.SUCCESS }}" == "true" ]; then
-          echo "✅ **全テスト成功**" >> docker-test-report.md
-          echo "" >> docker-test-report.md
-          echo "🚀 EG-R2 Laravel サンプルが正常に動作しています！" >> docker-test-report.md
-        else
-          echo "❌ **テスト失敗**" >> docker-test-report.md
-        fi
-        echo "" >> docker-test-report.md
-        echo "### 📊 テスト詳細" >> docker-test-report.md
-        echo "\`\`\`" >> docker-test-report.md
-        tail -20 test-output.txt >> docker-test-report.md
-        echo "\`\`\`" >> docker-test-report.md
-        echo "" >> docker-test-report.md
-        echo "### 🔧 実行環境" >> docker-test-report.md
-        echo "- PHP: \`$(docker compose exec -T app php -v | head -1)\`" >> docker-test-report.md
-        echo "- Laravel: \`$(docker compose exec -T app php artisan --version)\`" >> docker-test-report.md
-        echo "- EG-R2: Schema-driven development enabled" >> docker-test-report.md
-
-    - name: Comment PR with Docker results
+    - name: Comment PR
       if: github.event_name == 'pull_request'
       uses: actions/github-script@v7
       with:
         script: |
-          const fs = require('fs');
-          const report = fs.readFileSync('docker-test-report.md', 'utf8');
+          const success = '${{ steps.test.outputs.SUCCESS }}' === 'true';
+          const emoji = success ? '✅' : '❌';
+          const status = success ? '全テスト成功' : 'テスト失敗';
+          
+          const body = `## 🧪 テスト結果
+          
+          ${emoji} **${status}**
+          
+          ### 📊 実行結果
+          \`\`\`
+          ${{ steps.test.outputs.TEST_OUTPUT }}
+          \`\`\`
+          
+          ### 🔧 実行環境
+          - PHP: 8.2
+          - Laravel: 11.0
+          - EG-R2: Schema-driven development enabled
+          `;
           
           github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
-            body: report
+            body: body
           });
-
-    - name: Cleanup
-      if: always()
-      run: docker compose down -v
