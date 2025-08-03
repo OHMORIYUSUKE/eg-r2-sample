@@ -17,17 +17,29 @@ jobs:
       run: |
         cp .env.example .env
         echo "APP_KEY=" >> .env
+        # Set proper ownership for mounted files
+        sudo chown -R $USER:$USER .
 
     - name: Build and start containers
       run: |
         docker compose up -d
         sleep 30
 
-    - name: Install dependencies
-      run: docker compose exec -T app composer install --no-interaction
+    - name: Fix permissions and install dependencies
+      run: |
+        # Fix git safe directory
+        docker compose exec -T app git config --global --add safe.directory /var/www
+        # Fix vendor directory permissions
+        docker compose exec -T app mkdir -p vendor
+        docker compose exec -T app chown -R www-data:www-data /var/www
+        # Install dependencies
+        docker compose exec -T app composer install --no-interaction
 
     - name: Generate app key
-      run: docker compose exec -T app php artisan key:generate
+      run: |
+        docker compose exec -T app php artisan key:generate
+        # Ensure storage permissions
+        docker compose exec -T app chmod -R 775 storage bootstrap/cache
 
     - name: Wait for database
       run: |
