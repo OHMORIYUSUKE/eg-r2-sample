@@ -224,3 +224,6 @@ docker-compose exec app php artisan config:show eg_r2
 ## 📄 ライセンス
 
 MIT License
+
+---
+🧪 **GitHub Actions CI/CDテスト中** - この行は自動テスト確認用です
